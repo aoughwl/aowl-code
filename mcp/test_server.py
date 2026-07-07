@@ -111,9 +111,9 @@ def main():
         expected = {'compile', 'outline', 'nif_outline', 'nif_query',
                     'nif_diff', 'defs_uses',
                     'explain_failure', 'phase_report', 'nif_render', 'shrink',
-                    'api', 'symbols', 'build'}
+                    'api', 'symbols', 'build', 'decl_of'}
         assert expected <= names, 'missing tools: %r' % (expected - names)
-        ok('tools/list exposes all 13 tools')
+        ok('tools/list exposes all 14 tools')
 
         # ---- compile: bad Nim ------------------------------------------
         bad_nim = os.path.join(workdir, 'bad_nim.nim')
@@ -290,6 +290,51 @@ def main():
         assert 'nsum=42' in nbd.get('run', {}).get('output', ''), \
             'Nimony build run should capture output: %r' % nbd
         ok('build Nimony -> nimcache binary, ran it')
+
+        # ---- decl_of: reverse index (symId -> declaration site) --------
+        # good.nim (compiled to nimony above) declares `addup`.
+        dcl = client.call_tool('decl_of', {'symbol': 'addup', 'cwd': workdir})
+        assert isinstance(dcl.get('decls'), list) and dcl['decls'], \
+            'decl_of should find addup: %r' % dcl
+        d0 = dcl['decls'][0]
+        assert d0['kind'] == 'proc', 'addup should be a proc: %r' % d0
+        assert d0['file'] == 'good.nim' and isinstance(d0['line'], int), \
+            'decl_of should locate the source site: %r' % d0
+        assert d0['sym'].startswith('addup'), 'symId base: %r' % d0
+        assert 'addup' in d0.get('signature', ''), \
+            'decl_of should render a signature: %r' % d0
+        ok('decl_of "addup" -> %s at %s:%s' %
+           (d0['kind'], d0['file'], d0['line']))
+
+        # mangled-symId prefix match + terse shape
+        dcl2 = client.call_tool('decl_of',
+                                {'symbol': d0['sym'], 'cwd': workdir,
+                                 'terse': True})
+        assert dcl2.get('decls') and isinstance(dcl2['decls'][0], str), \
+            'terse decl_of should return strings: %r' % dcl2
+        ok('decl_of by mangled symId (terse) -> %r' % dcl2['decls'][0])
+
+        # unknown symId -> empty, no error
+        dcl3 = client.call_tool('decl_of',
+                                {'symbol': 'no_such_symbol_xyz',
+                                 'cwd': workdir})
+        assert dcl3.get('decls') == [], 'unknown symId -> []: %r' % dcl3
+        ok('decl_of unknown symbol -> []')
+
+        # ---- raw mode: tools echo the exact invocation ----------------
+        rawc = client.call_tool('compile', {'file': good,
+                                            'toolchain': 'nimony', 'raw': True})
+        assert 'nimony' in rawc.get('invocation', ''), \
+            'compile raw should echo the nimony argv: %r' % rawc
+        du = client.call_tool('defs_uses',
+                              {'file': good, 'line': 1, 'col': 6,
+                               'toolchain': 'nimony', 'raw': True})
+        joined = ' '.join(du.get('invocations', []))
+        assert '--def:' in joined or '--usages:' in joined, \
+            'defs_uses raw should echo idetools argv: %r' % du
+        assert 'absolute' in du.get('contract', ''), \
+            'defs_uses raw should surface the relative-path contract: %r' % du
+        ok('raw mode -> compile/defs_uses echo argv + contract')
 
     finally:
         client.close()

@@ -20,6 +20,7 @@ emits). Toolchain selection is automatic and overridable.
 - [Components](#components)
 - [MCP tool reference](#mcp-tool-reference)
 - [Terse mode](#terse-mode)
+- [Builder mode](#builder-mode)
 - [LSP (optional)](#lsp-optional)
 - [Hooks](#hooks)
 - [Commands](#commands)
@@ -102,14 +103,15 @@ nim-code/                         ${CLAUDE_PLUGIN_ROOT}
 │   ├── test_server.py            self-test: exercises all tools against live nim/nimony
 │   └── README.md                 manual nimsuggest / nimsem fallback notes
 ├── scripts/
-│   └── lsp-dispatch.py           picks nimlangserver vs nimony-lsp per project
+│   ├── lsp-dispatch.py           picks nimlangserver vs nimony-lsp per project
+│   └── gen-nif-grammar.py        regenerates skills/nif-format/nif-grammar.md
 ├── hooks/
 │   ├── hooks.json                hook wiring
 │   ├── guard-nif-read.py         PreToolUse(Read)  — intercept large .nif reads
 │   ├── guard-nif-bash.py         PreToolUse(Bash)  — intercept .nif dumps
 │   └── trim-build-output.py      PostToolUse(Bash) — strip build noise
 ├── commands/                     11 slash commands (see Commands)
-├── skills/                       5 skills (see Skills and subagents)
+├── skills/                       6 skills (see Skills and subagents)
 └── agents/                       2 subagents (see Skills and subagents)
 ```
 
@@ -119,10 +121,12 @@ call. It never returns a whole NIF file.
 
 ## MCP tool reference
 
-Thirteen tools are exposed by the `nimlang` server. `compile`, `build`, `outline`,
+Fourteen tools are exposed by the `nimlang` server. `compile`, `build`, `outline`,
 `defs_uses`, `explain_failure`, `phase_report`, `shrink`, `api`, and `symbols`
-support both toolchains. The `nif_*` tools operate on Nimony NIF artifacts and
-are Nimony‑only. Every tool accepts `terse` (see [Terse mode](#terse-mode)).
+support both toolchains; `decl_of` is Nimony‑only. The `nif_*` tools operate on
+Nimony NIF artifacts and are Nimony‑only. Every tool accepts `terse` (see
+[Terse mode](#terse-mode)). `compile`, `build`, and `defs_uses` also accept
+`raw` (see [Builder mode](#builder-mode)).
 
 | Tool | Signature | Result / behavior | Toolchains |
 |------|-----------|-------------------|------------|
@@ -135,6 +139,7 @@ are Nimony‑only. Every tool accepts `terse` (see [Terse mode](#terse-mode)).
 | `shrink` | `(file, toolchain="auto")` | Delta‑debugs a failing file, dropping top‑level statements while the first `Error:` message is preserved. Returns `{original_lines, minimal_lines, minimal_source, kept_error}`. Iteration‑ and time‑bounded. | both |
 | `api` | `(module, toolchain="auto", needle=None)` | Typed public API of a module or dependency without reading its source. Nim runs `nim jsondoc` on a `.nim` path, an installed nimble package (e.g. `chroma`), or a stdlib module (e.g. `std/tables`), returning `{name, kind, sig}` entries. For a `.nif`/Nimony target the typed API is the compiled artifact, rendered via `nif_render`. `needle` filters by name substring. | both |
 | `symbols` | `(name, root=".", kind=None, uses=false)` | Project‑wide symbol search by name substring; regex‑based and toolchain‑agnostic. Returns `{defs, root}`, and `{uses}` when `uses:true`. Skips `nimcache`, `.git`, `htmldocs`, and nimble dirs; bounded for large trees. | both |
+| `decl_of` | `(symbol, cwd=".", kind=None)` | Reverse index: a Nimony symId (`add.0.tgokb0h9q`, as emitted by `defs_uses`/idetools) or a plain name → its declaration site(s) `{sym, kind, file, line, col, signature, nif}`, walking the `.s.nif` artifacts (a `:`‑prefixed token is a declaration). Fills the symId‑keyed gap `symbols` (by name) and `defs_uses` (by position) leave open — for semantic tokens / workspace symbol. | Nimony |
 | `nif_outline` | `(nif_file)` | Top‑level `(tag name …)` nodes of a NIF artifact — names only, no bodies. | Nimony |
 | `nif_query` | `(nif_file, needle)` | S‑expr subtrees whose head tag or symbol matches `needle`, each snippet truncated, via a paren‑matching scanner. | Nimony |
 | `nif_render` | `(nif_file, needle=None)` | Renders NIF node(s) as compact pseudo‑Nim (`proc`/`var`/`let`/`call`/`if`/`type`/… mapped to Nim‑like syntax; `sym.NN.mod` demangled to `sym`), falling back to a raw snippet for unknown tags. Roughly an order of magnitude smaller than raw NIF. | Nimony |
@@ -157,6 +162,27 @@ back‑compatible and opt‑in.
 | `nif_query` / `nif_outline` / `nif_render` | Tighter per‑snippet caps (~15 lines); null fields omitted. |
 
 `/aggressive [on|off]` documents enabling terse mode and its trade‑offs.
+
+## Builder mode
+
+`compile`, `build`, and `defs_uses` accept an optional `raw` boolean. The tools
+normally *hide* the low‑level toolchain contracts (path handling, exit‑code‑0‑
+on‑error, coordinate bases) — which is what you want when reading or debugging,
+but exactly what you must reproduce when **building a competing consumer** of the
+compiler (an LSP, a formatter, a custom driver). With `raw:true` a tool also
+returns the exact argv it ran, so you can copy a known‑good invocation:
+
+- `compile` / `build` → `invocation` (the full `nim`/`nimony` command line).
+- `defs_uses` → `invocations` (the `nimsem …idetools` / `nimsuggest` commands)
+  plus `contract`, spelling out the gotcha the tool otherwise absorbs — notably
+  that idetools' tracked path must be the **cwd‑relative / basename** form stored
+  in the `.s.nif`, never an absolute path (which fails with *"symbol not found"*).
+
+The [`compiler-contracts`](skills/compiler-contracts/SKILL.md) skill collects
+these contracts, and [`nif-format/nif-grammar.md`](skills/nif-format/nif-grammar.md)
+— generated from the compiler source by `scripts/gen-nif-grammar.py` — is the
+parser‑grade NIF schema (decl‑kind classes, child‑slot layouts, `fld`/`efld`
+nesting) that the rendered‑output tools do not give.
 
 ## LSP (optional)
 
@@ -262,7 +288,8 @@ conclusion.
 
 | Skill | Purpose |
 |-------|---------|
-| `nif-format` | Condensed NIF tag vocabulary and the nifler → nimony → hexer → lengc pipeline; points to `doc/tags.md` for the long tail. |
+| `nif-format` | Condensed NIF tag vocabulary and the nifler → nimony → hexer → lengc pipeline; points to `doc/tags.md` for the long tail, and to the generated `nif-grammar.md` for the parser‑grade schema. |
+| `compiler-contracts` | The low‑level toolchain contracts for BUILDING on the compiler (LSP, formatter, custom driver): idetools relative‑path rule, exit‑code‑0, coordinate bases, NIF decl‑vs‑use and line‑info encoding. Pairs with `raw` mode. |
 | `nim-vs-nimony` | Feature‑set and toolchain differences; which binary handles what. |
 | `debug-loop` | The `AGENTS.md` compiler debug workflow (build → bug → nimcache diff → rep → `--overwrite`). |
 | `token-thrift` | Prefer recipe tools and terse mode; never dump a `.nif`; offload fix loops to `nim-fixer`. |
@@ -337,7 +364,7 @@ parsed:
   `nim c -r src/hastur build all`). Required for the Nimony side of every tool
   and for all `nif_*` tools.
 
-`mcp/test_server.py` starts the server and exercises all thirteen tools against
+`mcp/test_server.py` starts the server and exercises all fourteen tools against
 live `nim` and `nimony` compiles; run it to verify the environment.
 
 The optional LSP additionally needs a language server on `PATH` —
@@ -362,6 +389,13 @@ required for any MCP tool, hook, command, or skill.
 
 ## Changelog
 
+- **0.4** — Builder‑mode additions for consumers reimplementing the toolchain
+  (feedback from building `nimony-lsp`): `decl_of` reverse‑index tool (symId →
+  declaration site from the `.s.nif`); `raw` mode on `compile`/`build`/
+  `defs_uses` that echoes the exact argv and surfaces the idetools relative‑path
+  contract the tools otherwise hide; a generated parser‑grade
+  `skills/nif-format/nif-grammar.md` (`scripts/gen-nif-grammar.py`) with
+  decl‑kind classes and child‑slot layouts; and a `compiler-contracts` skill.
 - **0.3** — LSP is now a single auto‑dispatching `.lsp.json` entry
   (`scripts/lsp-dispatch.py`): it applies the plugin's toolchain detection per
   project and `exec`s `nimlangserver` for Nim or `nimony-lsp` for Nimony,

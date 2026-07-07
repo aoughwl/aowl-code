@@ -269,6 +269,8 @@ def tool_compile(args):
     }
     if timed_out:
         result['timed_out'] = True
+    if args.get('raw'):
+        result['invocation'] = ' '.join(cmd)
     return result
 
 
@@ -361,6 +363,8 @@ def tool_build(args):
         result['run'] = run_result
     if timed_out:
         result['timed_out'] = True
+    if args.get('raw'):
+        result['invocation'] = ' '.join(cmd)
     return result
 
 
@@ -511,10 +515,12 @@ def nif_parse_forms(text):
 
 
 def _base_tag(tok):
-    """Strip NIF line-info suffix (starting at '@') from a tag token."""
+    """Strip a NIF line-info suffix from a tag token. The suffix is introduced
+    by '@' or, for a negative-first delta, directly by '~' (e.g. 'efld~B,1')."""
     if tok is None:
         return ''
-    return tok.split('@', 1)[0]
+    m = re.search(r'[@~]', tok)
+    return tok[:m.start()] if m else tok
 
 
 def _clean_name(tok):
@@ -782,10 +788,13 @@ def tool_nif_diff(args):
 # Tool: defs_uses
 # --------------------------------------------------------------------------
 
-def nimsuggest_query(section, file_path, line, col):
-    """Run one nimsuggest def/use query. Returns list of {file,line,col}."""
+def nimsuggest_query(section, file_path, line, col, sink=None):
+    """Run one nimsuggest def/use query. Returns list of {file,line,col}.
+    If `sink` is a list, records the argv + stdin command for `raw`-mode echo."""
     cmd = [nim_bin('nimsuggest'), '--stdin', file_path]
     stdin_data = '%s %s:%d:%d\nquit\n' % (section, file_path, line, col)
+    if sink is not None:
+        sink.append(cmd + ['<<', '%s %s:%d:%d' % (section, file_path, line, col)])
     rc, out, timed_out = run(cmd, timeout=60, stdin_data=stdin_data)
     if timed_out or not out:
         return None
@@ -803,9 +812,9 @@ def nimsuggest_query(section, file_path, line, col):
     return results
 
 
-def defs_uses_nim(file_path, line, col):
-    defs = nimsuggest_query('def', file_path, line, col)
-    uses = nimsuggest_query('use', file_path, line, col)
+def defs_uses_nim(file_path, line, col, invocations=None):
+    defs = nimsuggest_query('def', file_path, line, col, invocations)
+    uses = nimsuggest_query('use', file_path, line, col, invocations)
     if defs is None and uses is None:
         # nimsuggest unavailable/flaky -> degrade
         return {
@@ -840,10 +849,19 @@ def _find_s_nif(cwd, basename):
     return None
 
 
-def _nimsem_idetools(mode_flag, nif_file, basename, line, col):
-    """mode_flag: '--usages' or '--def'. Returns list of {file,line,col}."""
+def _idetools_cmd(mode_flag, nif_file, basename, line, col):
+    """Build the exact nimsem idetools argv (single source of truth so `raw`
+    mode echoes precisely what ran)."""
     track = '%s:%s,%d,%d' % (mode_flag, basename, line, col)
-    cmd = [nimony_bin('nimsem'), track, 'idetools', nif_file]
+    return [nimony_bin('nimsem'), track, 'idetools', nif_file]
+
+
+def _nimsem_idetools(mode_flag, nif_file, basename, line, col, sink=None):
+    """mode_flag: '--usages' or '--def'. Returns list of {file,line,col}.
+    If `sink` is a list, the exact argv is appended for `raw`-mode echo."""
+    cmd = _idetools_cmd(mode_flag, nif_file, basename, line, col)
+    if sink is not None:
+        sink.append(cmd)
     rc, out, timed_out = run(cmd, timeout=60)
     if timed_out or not out:
         return None
@@ -866,7 +884,7 @@ def _nimsem_idetools(mode_flag, nif_file, basename, line, col):
     return results
 
 
-def defs_uses_nimony(file_path, line, col):
+def defs_uses_nimony(file_path, line, col, invocations=None):
     cwd = os.path.dirname(os.path.abspath(file_path)) or '.'
     basename = os.path.basename(file_path)
     hint = ('build the file first (nimony c %s), then run: nimsem '
@@ -883,8 +901,8 @@ def defs_uses_nimony(file_path, line, col):
                 'error': 'no .s.nif artifact found in %s/nimcache' % cwd,
                 'hint': hint}
 
-    defs = _nimsem_idetools('--def', s_nif, basename, line, col)
-    uses = _nimsem_idetools('--usages', s_nif, basename, line, col)
+    defs = _nimsem_idetools('--def', s_nif, basename, line, col, invocations)
+    uses = _nimsem_idetools('--usages', s_nif, basename, line, col, invocations)
     if defs is None and uses is None:
         return {'def': None, 'uses': [],
                 'error': 'nimsem idetools unavailable or timed out',
@@ -903,15 +921,37 @@ def tool_defs_uses(args):
     except (TypeError, ValueError):
         return {'error': 'line and col must be integers'}
     toolchain = resolve_toolchain(file_path, args.get('toolchain', 'auto'))
+    raw = bool(args.get('raw'))
+    invocations = [] if raw else None
     if toolchain == 'nimony':
-        result = defs_uses_nimony(file_path, line, col)
+        result = defs_uses_nimony(file_path, line, col, invocations)
     else:
-        result = defs_uses_nim(file_path, line, col)
+        result = defs_uses_nim(file_path, line, col, invocations)
+    if raw:
+        # De-abstract the tool: show the exact argv, and the low-level contract
+        # this tool otherwise hides — the single hardest gotcha for anyone
+        # driving idetools directly.
+        result['invocations'] = [' '.join(c) for c in (invocations or [])]
+        if toolchain == 'nimony':
+            result['contract'] = (
+                'nimsem idetools: the tracked path (--def/--usages FILE) must '
+                'be the basename/cwd-relative path stored in the .s.nif, NOT an '
+                'absolute path (absolute -> "symbol not found"). Run from the '
+                'file\'s dir. Input col is 1-based; output col is 0-based, '
+                'output line is 1-based.')
+        else:
+            result['contract'] = (
+                'nimsuggest: def/use over --stdin as "SECTION file:line:col"; '
+                'line and col are 1-based. Reply columns are tab-separated: '
+                'file=col5, line=col6, col=col7 (0-based).')
     if resolve_terse(args):
         terse = {'def': pos_to_str(result.get('def')),
                  'uses': [pos_to_str(u) for u in result.get('uses', [])]}
         if 'error' in result:
             terse['error'] = result['error']
+        if raw:
+            terse['invocations'] = result.get('invocations', [])
+            terse['contract'] = result.get('contract')
         return terse
     return result
 
@@ -1755,6 +1795,151 @@ def tool_symbols(args):
 
 
 # --------------------------------------------------------------------------
+# Tool: decl_of  (reverse index: symId -> declaration site, from NIF)
+# --------------------------------------------------------------------------
+
+def _sym_matches(csym, needle):
+    """A NIF symId matches `needle` either exactly / by mangled prefix (when the
+    needle carries a '.') or by human base name (segment before the first '.')."""
+    if not csym:
+        return False
+    if '.' in needle:
+        return csym == needle or csym.startswith(needle)
+    return csym.split('.', 1)[0] == needle
+
+
+def _build_top_nodes(text):
+    """Nested {tag,children} nodes for each top-level ( ... ) form."""
+    toks = _nif_tokenize(text)
+    nodes = []
+    pos = 0
+    n = len(toks)
+    while pos < n:
+        if toks[pos] == '(':
+            node, pos = _nif_build(toks, pos)
+            nodes.append(node)
+        else:
+            pos += 1
+    return nodes
+
+
+def _iter_decl_nodes(node):
+    """Yield nested nodes whose first child is a SymbolDef (a ':'-prefixed
+    declaration), recursing through the whole tree."""
+    if not isinstance(node, dict):
+        return
+    ch = node.get('children', [])
+    if ch and isinstance(ch[0], str) and ch[0][:1] == ':':
+        yield node
+    for c in ch:
+        if isinstance(c, dict):
+            for d in _iter_decl_nodes(c):
+                yield d
+
+
+def _signature_map(text, needle):
+    """csym -> one-line signature for matching decls (best-effort)."""
+    out = {}
+    try:
+        for top in _build_top_nodes(text):
+            for dn in _iter_decl_nodes(top):
+                csym = _clean_symbol(dn['children'][0])
+                if csym in out or not _sym_matches(csym, needle):
+                    continue
+                sig = _render_node(dn).split('\n', 1)[0].strip()
+                if len(sig) > 200:
+                    sig = sig[:200] + ' ...'
+                out[csym] = sig
+    except Exception:
+        pass
+    return out
+
+
+def tool_decl_of(args):
+    """Reverse index: given a symId (or human name), find its declaration
+    site(s) across the nimcache NIF artifacts. Fills the symId-keyed gap that
+    `symbols` (name/source regex) and `defs_uses` (position -> symbol) leave
+    open — the query semantic-tokens / workspace-symbol need."""
+    needle = args.get('symbol') or args.get('sym') or args.get('name')
+    if not needle:
+        return {'error': 'missing required arg: symbol'}
+    toolchain = args.get('toolchain', 'nimony')
+    if toolchain == 'nim':
+        return {'error': 'decl_of resolves NIF symIds and is Nimony-only; for '
+                         'Nim use `symbols` (by name) or `defs_uses` (by '
+                         'position).', 'toolchain': 'nim'}
+    root = args.get('cwd') or args.get('root') or '.'
+    ncache = os.path.join(root, 'nimcache')
+    if not os.path.isdir(ncache):
+        return {'error': 'no nimcache under %s' % root,
+                'hint': 'build a Nimony file first (nimony c <file>), or pass '
+                        'cwd=<dir containing nimcache>.'}
+    kind_filter = args.get('kind')
+    want_sig = not resolve_terse(args)
+
+    files = [p for p in glob.glob(os.path.join(ncache, '*.s.nif'))
+             if '.deps.' not in os.path.basename(p)]
+    files.sort(key=os.path.getmtime, reverse=True)
+
+    decls = []
+    seen = set()
+    truncated = False
+    for path in files[:600]:
+        try:
+            with open(path, 'r', errors='replace') as fh:
+                text = fh.read()
+        except (IOError, OSError):
+            continue
+        if needle not in text:  # cheap gate
+            continue
+        sigs = _signature_map(text, needle) if want_sig else {}
+        for f in nif_forms_with_pos(text):
+            toks = f.get('tokens') or []
+            if not toks:
+                continue
+            symtok = None
+            for t in toks[1:]:
+                if isinstance(t, str) and t[:1] == ':':
+                    symtok = t
+                    break
+            if symtok is None:
+                continue
+            csym = _clean_symbol(symtok)
+            if not _sym_matches(csym, needle):
+                continue
+            kind = _base_tag(toks[0])
+            if kind_filter and kind != kind_filter:
+                continue
+            src = f.get('src') or (None, None, None)
+            key = (csym, src[0], src[1], src[2], os.path.basename(path))
+            if key in seen:
+                continue
+            seen.add(key)
+            entry = {'sym': csym, 'kind': kind, 'file': src[0],
+                     'line': src[1], 'col': src[2],
+                     'nif': os.path.relpath(path, root)}
+            if want_sig and csym in sigs:
+                entry['signature'] = sigs[csym]
+            decls.append(entry)
+            if len(decls) >= _MAX_HITS:
+                truncated = True
+                break
+        if truncated:
+            break
+
+    if resolve_terse(args):
+        out = {'decls': ['%s:%s:%s %s %s' % (d['file'], d['line'], d['col'],
+                                             d['kind'], d['sym'])
+                         for d in decls]}
+    else:
+        out = {'decls': decls}
+    out['root'] = root
+    if truncated:
+        out['truncated'] = True
+    return out
+
+
+# --------------------------------------------------------------------------
 # Tool registry / schemas
 # --------------------------------------------------------------------------
 
@@ -1765,6 +1950,13 @@ TOOLCHAIN_ENUM = {'type': 'string', 'enum': ['auto', 'nim', 'nimony'],
 TERSE_PROP = {'type': 'boolean',
               'description': 'Aggressive token-saving output. Defaults to the '
                              'truthy env var NIMLANG_AGGRESSIVE.'}
+
+RAW_PROP = {'type': 'boolean',
+            'description': 'Builder mode: also echo the exact toolchain '
+                           'argv(s) this tool ran (and, for defs_uses, the '
+                           'low-level idetools/nimsuggest contract it '
+                           'otherwise hides). Use when reimplementing a '
+                           'compiler driver.'}
 
 TOOLS = [
     {
@@ -1779,6 +1971,7 @@ TOOLS = [
                 'extra_args': {'type': 'array', 'items': {'type': 'string'},
                                'description': 'Extra compiler args.'},
                 'terse': TERSE_PROP,
+                'raw': RAW_PROP,
             },
             'required': ['file'],
         },
@@ -1804,6 +1997,7 @@ TOOLS = [
                 'extra_args': {'type': 'array', 'items': {'type': 'string'},
                                'description': 'Extra compiler args.'},
                 'terse': TERSE_PROP,
+                'raw': RAW_PROP,
             },
             'required': ['file'],
         },
@@ -1880,6 +2074,8 @@ TOOLS = [
                 'line': {'type': 'integer'},
                 'col': {'type': 'integer'},
                 'toolchain': TOOLCHAIN_ENUM,
+                'terse': TERSE_PROP,
+                'raw': RAW_PROP,
             },
             'required': ['file', 'line', 'col'],
         },
@@ -1997,6 +2193,36 @@ TOOLS = [
             'required': ['name'],
         },
         'handler': tool_symbols,
+    },
+    {
+        'name': 'decl_of',
+        'description': 'Reverse index: given a Nimony symId (e.g. '
+                       '"add.0.tgokb0h9q", as emitted by defs_uses/idetools) or '
+                       'a plain name, return its declaration site(s) '
+                       '{sym, kind, file, line, col, signature, nif} from the '
+                       'nimcache NIF artifacts. Fills the symId-keyed gap that '
+                       '`symbols` (by name) and `defs_uses` (by position) leave '
+                       'open, e.g. for semantic-tokens / workspace-symbol. '
+                       'Nimony-only.',
+        'inputSchema': {
+            'type': 'object',
+            'properties': {
+                'symbol': {'type': 'string',
+                           'description': 'A NIF symId (mangled; matched '
+                                          'exactly or by prefix when it '
+                                          'contains ".") or a human name '
+                                          '(matched against the symId base).'},
+                'cwd': {'type': 'string',
+                        'description': 'Directory containing nimcache/ (default '
+                                       'cwd).'},
+                'kind': {'type': 'string',
+                         'description': 'Optional filter on the decl tag: '
+                                        'proc/type/let/var/const/efld/...'},
+                'terse': TERSE_PROP,
+            },
+            'required': ['symbol'],
+        },
+        'handler': tool_decl_of,
     },
 ]
 
