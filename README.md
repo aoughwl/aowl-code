@@ -20,6 +20,7 @@ emits). Toolchain selection is automatic and overridable.
 - [Components](#components)
 - [MCP tool reference](#mcp-tool-reference)
 - [Terse mode](#terse-mode)
+- [LSP (optional, Nim)](#lsp-optional-nim)
 - [Hooks](#hooks)
 - [Commands](#commands)
 - [Skills and subagents](#skills-and-subagents)
@@ -95,6 +96,7 @@ argument overrides it per call.
 nim-code/                         ${CLAUDE_PLUGIN_ROOT}
 ├── .claude-plugin/plugin.json    manifest
 ├── .mcp.json                     registers the `nimlang` MCP server
+├── .lsp.json                     optional Nim LSP (nimlangserver) — see LSP
 ├── mcp/
 │   ├── server.py                 MCP server — stdlib-only Python 3.7, zero dependencies
 │   ├── test_server.py            self-test: exercises all tools against live nim/nimony
@@ -152,6 +154,31 @@ back‑compatible and opt‑in.
 | `nif_query` / `nif_outline` / `nif_render` | Tighter per‑snippet caps (~15 lines); null fields omitted. |
 
 `/aggressive [on|off]` documents enabling terse mode and its trade‑offs.
+
+## LSP (optional, Nim)
+
+`.lsp.json` registers [`nimlangserver`](https://github.com/nim-lang/langserver)
+as a Nim language server. Claude Code consumes it as a first‑class capability:
+after each edit to a `.nim`/`.nims` file it injects type errors into context
+automatically (no separate build step), and the agent can call it for
+go‑to‑definition, find‑references, hover types, and workspace symbol search —
+backed by a persistent index, so results are more precise than the per‑call
+`nimsuggest`/regex paths the MCP tools use.
+
+This is an **optional enhancement, not part of the baseline**:
+
+- **Nim only.** Nimony has no LSP; its navigation and diagnostics stay on the
+  MCP tools (`compile`, `defs_uses`, `symbols`, the `nif_*` family). The MCP
+  layer remains the both‑toolchains, zero‑dependency baseline.
+- **Requires a separate install**: `nimble install nimlangserver`. Until the
+  binary is on `PATH`, the entry surfaces in the `/plugin` **Errors** tab and
+  everything else in the plugin continues to work.
+- Auto‑diagnostics are on (`"diagnostics": true`). To keep code navigation but
+  suppress the automatic per‑edit injection, set it to `false` in `.lsp.json`.
+
+The LSP and the MCP tools are complementary: the LSP closes the edit → error
+loop for Nim automatically, while the MCP tools provide the NIF‑aware,
+Nimony‑capable, and dependency‑API operations an LSP does not.
 
 ## Hooks
 
@@ -269,6 +296,10 @@ parsed:
 `mcp/test_server.py` starts the server and exercises all twelve tools against
 live `nim` and `nimony` compiles; run it to verify the environment.
 
+The optional Nim LSP additionally needs **nimlangserver** (`nimble install
+nimlangserver`); see [LSP](#lsp-optional-nim). It is not required for any MCP
+tool, hook, command, or skill.
+
 ## Design notes
 
 - **Zero dependencies.** The server and hooks are stdlib‑only Python 3.7, so the
@@ -288,7 +319,8 @@ live `nim` and `nimony` compiles; run it to verify the environment.
 - **0.2** — Terse mode on all tools (`NIMLANG_AGGRESSIVE`); `explain_failure`,
   `phase_report`, `nif_render`, `shrink`, `api`, `symbols`; `guard-nif-bash`
   hook and the transform‑not‑block upgrade to `guard-nif-read`; `nim-fixer`
-  subagent; `token-thrift` and `repo-map` skills.
+  subagent; `token-thrift` and `repo-map` skills; installable as a marketplace;
+  optional Nim LSP via `.lsp.json` (`nimlangserver`).
 - **0.1** — `nimlang` MCP server (`compile`, `outline`, `nif_outline`,
   `nif_query`, `nif_diff`, `defs_uses`); `guard-nif-read` and
   `trim-build-output` hooks; `nif-inspector` subagent; `nif-format`,

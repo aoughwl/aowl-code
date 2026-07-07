@@ -1,0 +1,10 @@
+{
+  "nim": {
+    "command": "nimlangserver",
+    "extensionToLanguage": {
+      ".nim": "nim",
+      ".nims": "nim"
+    },
+    "diagnostics": true
+  }
+}
