@@ -124,7 +124,10 @@ call. It never returns a whole NIF file.
 Fourteen tools are exposed by the `nimlang` server. `compile`, `build`, `outline`,
 `defs_uses`, `explain_failure`, `phase_report`, `shrink`, `api`, and `symbols`
 support both toolchains; `decl_of` is Nimony‑only. The `nif_*` tools operate on
-Nimony NIF artifacts and are Nimony‑only. Every tool accepts `terse` (see
+Nimony NIF artifacts and are Nimony‑only; `nif_outline`, `nif_query`, and
+`nif_render` (like `decl_of`) prefer the [`niflens`](https://github.com/aoughwl/niflens)
+helper — the compiler's own NIF libraries — and fall back to the in‑Python NIF
+parser when it is absent (each reports `backend`). Every tool accepts `terse` (see
 [Terse mode](#terse-mode)). `compile`, `build`, and `defs_uses` also accept
 `raw` (see [Builder mode](#builder-mode)).
 
@@ -395,6 +398,13 @@ required for any MCP tool, hook, command, or skill.
 
 ## Changelog
 
+- **0.6** — `nif_outline`, `nif_query`, and `nif_render` now also prefer the
+  [`niflens`](https://github.com/aoughwl/niflens) helper (the compiler's own NIF
+  libraries) with the in‑Python parser as fallback — completing the migration of
+  NIF *parsing* off the regex path for every NIF tool. niflens gained `render`,
+  `index` (`.s.idx.nif` via `nifindexes`), `outline`, `query`, and a `serve`
+  stdio daemon (one process across requests — the basis for a shared NIF daemon
+  backing both this plugin and a Nimony LSP).
 - **0.5** — `decl_of` now prefers the [`niflens`](https://github.com/aoughwl/niflens)
   helper — a Nim CLI over Nimony's own NIF libraries (`nifreader`/`nifstreams`/
   `nifcursors`) — for authoritative line info and module‑qualified symIds,

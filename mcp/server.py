@@ -642,6 +642,23 @@ def tool_nif_outline(args):
         return {'error': 'missing required arg: nif_file'}
     if not os.path.isfile(nif_file):
         return {'error': 'no such file: %s' % nif_file}
+
+    nl = _niflens_run('outline', nif_file)
+    if nl is not None and isinstance(nl.get('tags'), list):
+        terse = resolve_terse(args)
+        tags = []
+        for t in nl['tags']:
+            if terse:
+                item = {'tag': t.get('tag'), 'line': t.get('line')}
+                if t.get('name'):
+                    item['name'] = t['name']
+            else:
+                item = {'tag': t.get('tag'), 'name': t.get('name', ''),
+                        'line': t.get('line'), 'col': t.get('col'),
+                        'sym': t.get('sym')}
+            tags.append(item)
+        return {'tags': tags, 'backend': 'niflens'}
+
     try:
         text = _read_nif(nif_file)
     except (IOError, OSError) as e:
@@ -686,8 +703,8 @@ def tool_nif_outline(args):
             if node['name']:
                 item['name'] = node['name']
             terse.append(item)
-        return {'tags': terse}
-    return {'tags': tags}
+        return {'tags': terse, 'backend': 'python'}
+    return {'tags': tags, 'backend': 'python'}
 
 
 def _truncate_snippet(text, max_lines=40, max_chars=2000):
@@ -714,13 +731,31 @@ def tool_nif_query(args):
         return {'error': 'missing required arg: needle'}
     if not os.path.isfile(nif_file):
         return {'error': 'no such file: %s' % nif_file}
+
+    terse = resolve_terse(args)
+    max_lines = 15 if terse else 40
+
+    nl = _niflens_run('query', nif_file, [needle])
+    if nl is not None and isinstance(nl.get('matches'), list):
+        matches = []
+        for m in nl['matches'][:50]:
+            snip = _truncate_snippet(m.get('snippet', ''), max_lines=max_lines)
+            if terse:
+                item = {'tag': m.get('tag'), 'snippet': snip}
+                if m.get('name'):
+                    item['name'] = m['name']
+            else:
+                item = {'tag': m.get('tag'), 'name': m.get('name', ''),
+                        'snippet': snip}
+            matches.append(item)
+        return {'matches': matches, 'count': len(matches),
+                'backend': 'niflens'}
+
     try:
         text = _read_nif(nif_file)
     except (IOError, OSError) as e:
         return {'error': str(e)}
 
-    terse = resolve_terse(args)
-    max_lines = 15 if terse else 40
     needle_l = needle.lower()
     forms = nif_parse_forms(text)
     matches = []
@@ -749,7 +784,7 @@ def tool_nif_query(args):
                 matches.append({'tag': tag, 'name': name, 'snippet': snippet})
             if len(matches) >= cap:
                 break
-    return {'matches': matches, 'count': len(matches)}
+    return {'matches': matches, 'count': len(matches), 'backend': 'python'}
 
 
 # --------------------------------------------------------------------------
@@ -1243,13 +1278,27 @@ def tool_nif_render(args):
         return {'error': 'missing required arg: nif_file'}
     if not os.path.isfile(nif_file):
         return {'error': 'no such file: %s' % nif_file}
+
+    terse = resolve_terse(args)
+    max_lines = 10 if terse else 15
+
+    nl = _niflens_run('render', nif_file, [needle] if needle else None)
+    if nl is not None and isinstance(nl.get('nodes'), list):
+        rendered = []
+        for n in nl['nodes'][:40]:
+            pseudo = _truncate_snippet(n.get('render', ''),
+                                       max_lines=max_lines, max_chars=1500)
+            item = {'tag': n.get('kind', ''), 'pseudo_nim': pseudo}
+            if n.get('name'):
+                item['name'] = n['name']
+            rendered.append(item)
+        return {'rendered': rendered, 'backend': 'niflens'}
+
     try:
         text = _read_nif(nif_file)
     except (IOError, OSError) as e:
         return {'error': str(e)}
 
-    terse = resolve_terse(args)
-    max_lines = 10 if terse else 15
     forms = nif_parse_forms(text)
 
     targets = []  # (start, end, tag, name)
@@ -1298,7 +1347,7 @@ def tool_nif_render(args):
         elif name:
             item['name'] = name
         rendered.append(item)
-    return {'rendered': rendered}
+    return {'rendered': rendered, 'backend': 'python'}
 
 
 # --------------------------------------------------------------------------
@@ -1866,6 +1915,23 @@ def _find_niflens():
         import shutil
         return shutil.which('niflens')
     except Exception:
+        return None
+
+
+def _niflens_run(subcmd, nif_file, extra=None):
+    """Run a niflens subcommand over a NIF file and return the parsed JSON, or
+    None when niflens is absent / fails / times out (so callers fall back to the
+    in-Python parser). `extra` is an optional list of trailing args."""
+    nl = _find_niflens()
+    if not nl:
+        return None
+    cmd = [nl, subcmd, nif_file] + list(extra or [])
+    rc, out, timed = run(cmd, timeout=30)
+    if timed or rc != 0 or not out.strip():
+        return None
+    try:
+        return json.loads(out)
+    except ValueError:
         return None
 
 

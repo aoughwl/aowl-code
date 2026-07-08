@@ -170,7 +170,10 @@ def main():
         assert 'tags' in out and isinstance(out['tags'], list) and out['tags']
         for node in out['tags']:
             assert 'tag' in node and 'name' in node and 'line' in node
-        ok('nif_outline -> %d top-level tags' % len(out['tags']))
+        assert out.get('backend') in ('niflens', 'python'), \
+            'nif_outline should report its backend: %r' % out
+        ok('nif_outline -> %d top-level tags (backend=%s)' %
+           (len(out['tags']), out.get('backend')))
 
         q = client.call_tool('nif_query',
                              {'nif_file': nif_file, 'needle': 'proc'})
