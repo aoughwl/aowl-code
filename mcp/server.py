@@ -1642,8 +1642,16 @@ def tool_shrink(args):
 
 
 def aowli_bin(name):
-    """Resolve an aowli binary (default ~/aowli/bin), like nimony_bin/nim_bin."""
-    return find_bin(name, 'AOWLI_BIN_DIR', _home('aowli', 'bin'))
+    """Resolve an aowli binary. This is a PUBLIC plugin, so prefer an installed
+    *release* binary over a private source checkout: try $AOWLI_BIN_DIR, then
+    ~/.aowl/bin (the aowl version-manager location), then ~/aowli/bin (dev
+    fallback). Release binaries: github.com/aoughwl/aowli-release."""
+    for d in (os.environ.get('AOWLI_BIN_DIR'), _home('.aowl', 'bin'), _home('aowli', 'bin')):
+        if d:
+            p = os.path.join(d, name)
+            if os.path.isfile(p) and os.access(p, os.X_OK):
+                return p
+    return find_bin(name, 'AOWLI_BIN_DIR', _home('.aowl', 'bin'))
 
 
 # main module's .s.nif header line: (stmts@,<base36 count>,<path>/<basename>
