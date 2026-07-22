@@ -1718,6 +1718,19 @@ def tool_trace(args):
     except (TypeError, ValueError):
         max_lines = 300
 
+    # trace mode: profile (per-routine counts, best for WIDE call-heavy
+    # programs) vs. the full tree (optionally depth-bounded for DEEP recursion).
+    if bool(args.get('profile')):
+        trace_flags = ['--trace-profile']
+    else:
+        trace_flags = ['--trace']
+        try:
+            depth = args.get('depth')
+            if depth is not None and int(depth) > 0:
+                trace_flags.append('--trace-depth:%d' % int(depth))
+        except (TypeError, ValueError):
+            pass
+
     interp = aowli_bin('aowli-interp')
     if not (os.path.isfile(interp) and os.access(interp, os.X_OK)):
         return {'error': 'aowli-interp binary not found or not executable '
@@ -1752,7 +1765,8 @@ def tool_trace(args):
         # 3) run under the tracer; STDERR = call tree, STDOUT = program output.
         try:
             proc = subprocess.Popen(
-                [interp, '--trace', main],
+                [interp] + trace_flags + [main],
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 universal_newlines=True)
             prog_out, trace_txt = proc.communicate(timeout=120)
@@ -1760,8 +1774,12 @@ def tool_trace(args):
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.communicate()
-            return {'error': 'aowli-interp timed out (possible infinite loop '
-                             'in the traced program)'}
+            return {'error': 'aowli-interp exceeded 120s. A full call-tree '
+                             'trace is expensive on call-heavy programs (it is '
+                             'usually volume, not a hang). Retry with '
+                             'profile=true (per-routine counts), depth=N (bound '
+                             'the tree), or use the debug tool with a targeted '
+                             'breakpoint.'}
         except OSError as e:
             return {'error': 'failed to launch aowli-interp: %s' % e}
 
@@ -2558,6 +2576,16 @@ TOOLS = [
                               'description': 'Cap on call-tree lines returned '
                                              '(default 300; summary footer '
                                              'always kept).'},
+                'profile': {'type': 'boolean',
+                            'description': 'Per-routine call-count profile '
+                                           '(--trace-profile) instead of the '
+                                           'full tree. Use for wide/call-heavy '
+                                           'programs where a full trace '
+                                           'explodes.'},
+                'depth': {'type': 'integer',
+                          'description': 'Record calls only to this depth '
+                                         '(--trace-depth:N); bounds a deep '
+                                         'tree. Ignored when profile=true.'},
                 'raw': RAW_PROP,
             },
             'required': ['file'],
