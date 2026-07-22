@@ -3,6 +3,10 @@
     "nimlang": {
       "command": "python3",
       "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.py"]
+    },
+    "nimtools": {
+      "command": "bash",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/nimtools_launch.sh"]
     }
   }
 }
